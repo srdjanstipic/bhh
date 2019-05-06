@@ -4,6 +4,14 @@
 #include <math.h>
 #include <algorithm>
 
+#define USE_BVH 1
+
+#if USE_BVH
+#define NUMBER_OF_PLANES 6
+#else
+#define NUMBER_OF_PLANES 4
+#endif
+
 struct Clock
 {
   const clock_t m_start;
@@ -22,7 +30,7 @@ struct float3
 {
   float x,y,z;
 };
-  
+
 float3 operator+(const float3 a, const float3 b)
 {
   float3 c = {a.x+b.x, a.y+b.y, a.z+b.z};
@@ -66,7 +74,7 @@ int intersects(const AABB a, const AABB b)
   && a.m_min.z <= b.m_max.z
   && a.m_max.z >= b.m_min.z)
     return 1;
-  return 0;    
+  return 0;
 }
 
 float random(float lo, float hi)
@@ -113,8 +121,8 @@ struct Object
 
 struct bhh_compare
 {
-  int m_direction;
-  bhh_compare(int direction) : m_direction(direction) {}
+  unsigned int m_direction;
+  bhh_compare(unsigned int direction) : m_direction(direction) {}
   bool operator ()(const AABB& a, const AABB& b) const
   {
     switch(m_direction)
@@ -122,7 +130,13 @@ struct bhh_compare
     case 0: return a.m_min.x < b.m_min.x;
     case 1: return a.m_min.y < b.m_min.y;
     case 2: return a.m_min.z < b.m_min.z;
+#if USE_BVH
+    case 3: return a.m_max.x > b.m_max.x;
+    case 4: return a.m_max.y > b.m_max.y;
+    case 5: return a.m_max.z > b.m_max.z;
+#else
     case 3: return -(a.m_max.x + a.m_max.y + a.m_max.z) < -(b.m_max.x + b.m_max.y + b.m_max.z);
+#endif
     }
     return false;
   }
@@ -130,8 +144,8 @@ struct bhh_compare
 
 struct bhh_reject
 {
-  int m_direction;
-  bhh_reject(int direction) : m_direction(direction) {}
+  unsigned int m_direction;
+  bhh_reject(unsigned int direction) : m_direction(direction) {}
   bool operator()(const AABB& aabb, const AABB& query) const
   {
     switch(m_direction)
@@ -139,24 +153,30 @@ struct bhh_reject
     case 0: return query.m_max.x < aabb.m_min.x; break;
     case 1: return query.m_max.y < aabb.m_min.y; break;
     case 2: return query.m_max.z < aabb.m_min.z; break;
+#if USE_BVH
+    case 3: return query.m_min.x > aabb.m_max.x; break;
+    case 4: return query.m_min.y > aabb.m_max.y; break;
+    case 5: return query.m_min.z > aabb.m_max.z; break;
+#else
     case 3: return -(query.m_min.x + query.m_min.y + query.m_min.z)
-                 < -(aabb.m_max.x  + aabb.m_max.y  + aabb.m_max.z );      
+                 < -(aabb.m_max.x  + aabb.m_max.y  + aabb.m_max.z );
+#endif
     }
     return false;
   }
 };
 
-void bhh_sort(AABB* begin, AABB* end, int direction = 0)
+void bhh_sort(AABB* begin, AABB* end, unsigned int direction = 0)
 {
   if(end - begin < 2)
     return;
   AABB* median = begin + (end - begin) / 2;
   std::nth_element(begin, median, end, bhh_compare(direction));
-  bhh_sort(begin, median, (direction + 1) & 3);
-  bhh_sort(median+1, end, (direction + 1) & 3);
+  bhh_sort(begin, median, (direction + 1) % NUMBER_OF_PLANES);
+  bhh_sort(median+1, end, (direction + 1) % NUMBER_OF_PLANES);
 }
 
-int bhh_search(const AABB* begin, const AABB* end, const AABB query, int direction = 0)
+int bhh_search(const AABB* begin, const AABB* end, const AABB query, unsigned int direction = 0)
 {
   switch(end - begin)
   {
@@ -164,10 +184,10 @@ int bhh_search(const AABB* begin, const AABB* end, const AABB query, int directi
     case 0: return 0;
   }
   const AABB* median = begin + (end - begin) / 2;
-  const int intersections = bhh_search(begin, median, query, (direction + 1) & 3);
+  const int intersections = bhh_search(begin, median, query, (direction + 1) % NUMBER_OF_PLANES);
   if(bhh_reject(direction)(*median, query))
     return intersections;
-  return intersections + intersects(*median, query) + bhh_search(median+1, end, query, (direction + 1) & 3);
+  return intersections + intersects(*median, query) + bhh_search(median+1, end, query, (direction + 1) % NUMBER_OF_PLANES);
 }
 
 int main(int argc, char* argv[])
@@ -176,23 +196,35 @@ int main(int argc, char* argv[])
   mesh.Generate(100, 1.0f);
 
   const int kTests = 100;
-  
+
   const int kObjects = 1000000;
-  std::vector<Object> objects(kObjects);
-  for(int o = 0; o < kObjects; ++o)
-  {
-    objects[o].m_mesh = &mesh;
-    objects[o].m_position.x = random(-50.f, 50.f);
-    objects[o].m_position.y = random(-50.f, 50.f);
-    objects[o].m_position.z = random(-50.f, 50.f);
-  }
-  
   std::vector<AABB> unsorted(kObjects);
-  for(int a = 0; a < kObjects; ++a)
-    objects[a].CalculateAABB(&unsorted[a]);
+  {
+    const Clock clock;
+    std::vector<Object> objects(kObjects);
+    for(int o = 0; o < kObjects; ++o)
+    {
+      objects[o].m_mesh = &mesh;
+      objects[o].m_position.x = random(-50.f, 50.f);
+      objects[o].m_position.y = random(-50.f, 50.f);
+      objects[o].m_position.z = random(-50.f, 50.f);
+    }
+
+    for(int a = 0; a < kObjects; ++a)
+      objects[a].CalculateAABB(&unsorted[a]);
+    const float seconds = clock.seconds();
+
+    printf("Initializing took %f seconds\n", seconds);
+  }
 
   std::vector<AABB> sorted = unsorted;
-  bhh_sort(&sorted[0], &sorted[0]+sorted.size());
+  {
+    const Clock clock;
+    bhh_sort(&sorted[0], &sorted[0]+sorted.size());
+    const float seconds = clock.seconds();
+
+    printf("Sorting took %f seconds\n", seconds);
+  }
 
   {
     const Clock clock;
@@ -208,20 +240,20 @@ int main(int argc, char* argv[])
       }
     }
     const float seconds = clock.seconds();
-    
+
     printf("unsorted AABB array reported %d intersections in %f seconds\n", intersections, seconds);
   }
-  
+
   {
     const Clock clock;
     int intersections = 0;
     for(int test = 0; test < kTests; ++test)
-    {      
+    {
       const AABB query = unsorted[test];
       intersections += bhh_search(&sorted[0], &sorted[0]+sorted.size(), query);
     }
     const float seconds = clock.seconds();
-    
+
     printf("sorted AABB array reported %d intersections in %f seconds\n", intersections, seconds);
   }
   return 0;
